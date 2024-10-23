@@ -1,4 +1,4 @@
-# css-cleanup
+# CSS Analyzer
 Find unused classes in a react project
 
 1. Create a new directory for the project and initialize it:
