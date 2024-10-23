@@ -41,7 +41,7 @@ More info: https://sass-lang.com/d/color-functions
 ```
 SCSS Usage Analysis Report
 ------------------------
-Analyzing directory: /Users/avos/Development/beyond/frontend
+Analyzing directory: /users/bigco/project/frontend
 Total SCSS classes found: 533
 Total classes used in React: 446
 Number of unused classes: 226
