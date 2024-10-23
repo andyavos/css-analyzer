@@ -1,5 +1,5 @@
 # CSS Analyzer
-Find unused classes in a react project
+Find unused classes and deprecations in a React project
 
 1. Create a new directory for the project and initialize it:
 ```
