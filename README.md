@@ -1,5 +1,20 @@
-# CSS Analyzer
-Find unused classes and deprecated rules in a React project.
+# SCSS Usage Analyzer
+A CLI tool that statically analyzes SCSS and React files to detect unused CSS classes.
+
+It compiles SCSS, parses the resulting CSS, extracts class selectors, and compares them against class usage in React components.
+
+✨ Features
+🔍 Accurate CSS Parsing
+
+Compiles .scss files using sass
+
+Parses compiled CSS with postcss
+
+Extracts selectors using postcss-selector-parser
+
+Falls back to safe regex parsing if optional dependencies are unavailable
+
+This avoids fragile selector regex matching and improves reliability.
 
 1. Create a new directory for the project and initialize it:
 ```
