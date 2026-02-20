@@ -158,22 +158,15 @@ function collectFromExpression(expr, classes, filePath) {
             expr.elements.forEach(el => collectFromExpression(el, classes, filePath));
             break;
         case 'ObjectExpression':
-            // keys may be Identifier or StringLiteral; include keys with truthy static values
+            // keys may be Identifier or StringLiteral; include all keys as potentially used
+            // This handles BEM modifiers and conditional classes (e.g., classNames({ 'class--modifier': condition }))
             expr.properties.forEach(prop => {
                 if (prop.type === 'ObjectProperty') {
                     const keyName = prop.key.type === 'Identifier' ? prop.key.name :
                         (prop.key.type === 'StringLiteral' ? prop.key.value : null);
-                    // only include if value is a literal true-ish (true or truthy literal)
+                    // Include all keys regardless of their value, since the condition may be true at runtime
                     if (keyName) {
-                        if (prop.value.type === 'BooleanLiteral') {
-                            if (prop.value.value === true) classes.add(keyName);
-                        } else if (prop.value.type === 'NumericLiteral') {
-                            if (prop.value.value !== 0) classes.add(keyName);
-                        } else if (prop.value.type === 'StringLiteral') {
-                            if (prop.value.value) classes.add(keyName);
-                        } else {
-                            // non-static value; we can't determine at compile-time - skip
-                        }
+                        classes.add(keyName);
                     }
                 }
             });
