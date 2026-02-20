@@ -7,15 +7,11 @@ It compiles SCSS, parses the resulting CSS, extracts class selectors, and compar
 
 ### Accurate CSS Parsing
 
-Compiles .scss files using sass
-
-Parses compiled CSS with postcss
-
-Extracts selectors using postcss-selector-parser
-
-Falls back to safe regex parsing if optional dependencies are unavailable
-
-This avoids fragile selector regex matching and improves reliability.
+- Compiles .scss files using sass
+- Parses compiled CSS with postcss
+- Extracts selectors using postcss-selector-parser
+- Falls back to safe regex parsing if optional dependencies are unavailable
+- This avoids fragile selector regex matching and improves reliability.
 
 ### Intelligent React Class Extraction
 
@@ -30,13 +26,13 @@ Supports common React class usage patterns:
 
 ### Supported file types
 
-Scans: .js, .jsx, .ts, .tsx, .scss
+- Scans: .js, .jsx, .ts, .tsx and .scss files
+- Uses fast-glob when available for performance
+- Falls back to safe recursive file scanning
+- Ignores common directories (node_modules, build, dist, .git)
 
-Uses fast-glob when available for performance
 
-Falls back to safe recursive file scanning
-
-Ignores common directories (node_modules, build, dist, .git)
+### Installation
 
 
 1. Create a new directory for the project and initialize it:
@@ -79,14 +75,12 @@ More info: https://sass-lang.com/d/color-functions
 ```
 SCSS Usage Analysis Report
 ------------------------
-Analyzing directory: /users/bigco/project/frontend
-Total SCSS classes found: 533
-Total classes used in React: 446
-Number of unused classes: 226
-
-Files analyzed:
-- React files: 243
-- SCSS files: 57
+Analyzed directory: /users/bigco/project/frontend
+React files: 992
+SCSS files: 54
+Total SCSS classes found: 1666
+Total classes used in React: 1714
+Number of unused classes: 360
 
 Unused classes and their locations:
 - c-icon-animated--sharing (defined in web/src/sass/base/_animations.scss)
