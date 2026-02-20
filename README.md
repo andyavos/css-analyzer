@@ -11,7 +11,7 @@ npm init -y
 2. Install the required dependencies:
 
 ```
-npm install sass @babel/parser @babel/traverse
+npm install sass @babel/parser @babel/traverse postcss postcss-selector-parser fast-glob
 ```
 
 3. Save script and run
