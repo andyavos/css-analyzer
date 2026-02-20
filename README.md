@@ -3,8 +3,9 @@ A CLI tool that statically analyzes SCSS and React files to detect unused CSS cl
 
 It compiles SCSS, parses the resulting CSS, extracts class selectors, and compares them against class usage in React components.
 
-✨ Features
-🔍 Accurate CSS Parsing
+## ✨ Features
+
+### Accurate CSS Parsing
 
 Compiles .scss files using sass
 
@@ -15,6 +16,28 @@ Extracts selectors using postcss-selector-parser
 Falls back to safe regex parsing if optional dependencies are unavailable
 
 This avoids fragile selector regex matching and improves reliability.
+
+### Intelligent React Class Extraction
+
+Supports common React class usage patterns:
+
+- String literals
+- Template literals
+- clsx, classNames, cx
+- Arrays
+- Object expressions (BEM modifiers, conditional classes)
+- CSS module references
+
+### Supported file types
+
+Scans: .js, .jsx, .ts, .tsx, .scss
+
+Uses fast-glob when available for performance
+
+Falls back to safe recursive file scanning
+
+Ignores common directories (node_modules, build, dist, .git)
+
 
 1. Create a new directory for the project and initialize it:
 ```
