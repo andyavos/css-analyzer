@@ -1,5 +1,39 @@
-# CSS Analyzer
-Find unused classes and deprecated rules in a React project.
+# SCSS Usage Analyzer
+A CLI tool that statically analyzes SCSS and React files to detect unused CSS classes.
+
+It compiles SCSS, parses the resulting CSS, extracts class selectors, and compares them against class usage in React components.
+
+## ✨ Features
+
+### Accurate CSS Parsing
+
+- Compiles .scss files using sass
+- Parses compiled CSS with postcss
+- Extracts selectors using postcss-selector-parser
+- Falls back to safe regex parsing if optional dependencies are unavailable
+- This avoids fragile selector regex matching and improves reliability.
+
+### Intelligent React Class Extraction
+
+Supports common React class usage patterns:
+
+- String literals
+- Template literals
+- clsx, classNames, cx
+- Arrays
+- Object expressions (BEM modifiers, conditional classes)
+- CSS module references
+
+### Supported file types
+
+- Scans: .js, .jsx, .ts, .tsx and .scss files
+- Uses fast-glob when available for performance
+- Falls back to safe recursive file scanning
+- Ignores common directories (node_modules, build, dist, .git)
+
+
+### Installation
+
 
 1. Create a new directory for the project and initialize it:
 ```
@@ -11,7 +45,7 @@ npm init -y
 2. Install the required dependencies:
 
 ```
-npm install sass @babel/parser @babel/traverse
+npm install sass @babel/parser @babel/traverse postcss postcss-selector-parser fast-glob
 ```
 
 3. Save script and run
@@ -41,14 +75,12 @@ More info: https://sass-lang.com/d/color-functions
 ```
 SCSS Usage Analysis Report
 ------------------------
-Analyzing directory: /users/bigco/project/frontend
-Total SCSS classes found: 533
-Total classes used in React: 446
-Number of unused classes: 226
-
-Files analyzed:
-- React files: 243
-- SCSS files: 57
+Analyzed directory: /users/bigco/project/frontend
+React files: 992
+SCSS files: 54
+Total SCSS classes found: 1666
+Total classes used in React: 1714
+Number of unused classes: 360
 
 Unused classes and their locations:
 - c-icon-animated--sharing (defined in web/src/sass/base/_animations.scss)
