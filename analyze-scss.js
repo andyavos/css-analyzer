@@ -1,386 +1,272 @@
 #!/usr/bin/env node
+'use strict';
 /**
- * analyze-scss.js (improved)
+ * analyze-scss.js
  *
- * Improvements:
- * - Uses postcss + postcss-selector-parser (if available) to reliably collect class selectors
- * - Better extraction of className usage in React: supports string literals, template literals,
- *   clsx/classNames calls, arrays, object expressions, member expressions (styles.foo)
- * - Optionally uses fast-glob for faster file discovery; falls back to recursive fs scanning
- * - Collects multiple source locations per class (maps -> Sets)
- * - Provides JSON-friendly output with `--json` flag
- * - Graceful fallback when optional dependencies are not installed (prints warnings)
+ * SCSS Usage Analyzer — finds unused CSS classes across a React codebase.
  *
- * Recommended deps:
- *   npm install sass @babel/parser @babel/traverse postcss postcss-selector-parser fast-glob
+ * Usage:
+ *   node analyze-scss.js [options] [directory]
  *
- * The script is defensive and will still run without optional deps, but results may be less accurate.
+ * Options:
+ *   --json              Output as JSON
+ *   --dir <path>        Target directory (alternative to positional arg)
+ *   --threshold <n>     Also flag classes used fewer than n times in React (default: 0 = off)
+ *   --no-cache          Disable the mtime-based file cache
+ *   --watch             Re-run analysis on file changes
+ *
+ * Dependencies (required):
+ *   npm install sass @babel/parser @babel/traverse
+ *
+ * Dependencies (optional, improve accuracy):
+ *   npm install postcss postcss-selector-parser fast-glob
  */
 
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
-const sass = require('sass');
-const parser = require('@babel/parser');
-const traverse = require('@babel/traverse').default;
 
-// Try optional dependencies
-let fg = null;
-try { fg = require('fast-glob'); } catch (e) { /* optional */ }
+const { extractClassesFromScssFile } = require('./extractors/scss');
+const { extractClassesFromReactFile } = require('./extractors/react');
+const { getFiles }                    = require('./utils/files');
+const { FileCache }                   = require('./utils/cache');
+const { printTextReport, printJsonReport } = require('./reporters/index');
 
-let postcss = null;
-let selectorParser = null;
-try {
-    postcss = require('postcss');
-    selectorParser = require('postcss-selector-parser');
-} catch (e) {
-    // optional; we'll fall back to regex
-}
+const REACT_EXTS = ['.js', '.jsx', '.ts', '.tsx'];
+const SCSS_EXTS  = ['.scss', '.css'];
 
-// Utility: safe read
-function safeRead(file) {
-    try {
-        return fs.readFileSync(file, 'utf8');
-    } catch (e) {
-        console.warn(`Warning: couldn't read ${file}: ${e.message}`);
-        return '';
-    }
-}
+// ─── Core Analyzer ───────────────────────────────────────────────────────────
 
-// File discovery: patterns or fallback recursion
-function getFiles(rootDir, extensions, ignoreDirs = new Set(['node_modules', 'build', 'dist', '.git'])) {
-    const exts = new Set(extensions);
-    if (fg) {
-        // fast-glob patterns
-        const patterns = Array.from(exts).map(e => `**/*${e}`);
-        const entries = fg.sync(patterns, {
-            cwd: rootDir,
-            absolute: true,
-            suppressErrors: true,
-            dot: false,
-            ignore: Array.from(ignoreDirs).map(d => `**/${d}/**`)
-        });
-        return entries;
-    }
+function analyzeScssUsage(directory, opts = {}) {
+    const { noCache = false, threshold = 0 } = opts;
 
-    // fallback: recursive fs
-    const results = [];
-    function walk(dir) {
-        let items;
-        try { items = fs.readdirSync(dir); } catch (e) { return; }
-        for (const item of items) {
-            const full = path.join(dir, item);
-            let stat;
-            try { stat = fs.statSync(full); } catch (e) { continue; }
-            if (stat.isDirectory()) {
-                if (!ignoreDirs.has(item)) walk(full);
-            } else {
-                if (exts.has(path.extname(item))) results.push(full);
-            }
-        }
-    }
-    walk(rootDir);
-    return results;
-}
-
-// Parse compiled CSS using postcss if available, else regex fallback
-function extractScssClasses(scssContent, filePath) {
-    const classes = new Set();
-
-    try {
-        const result = sass.compileString(scssContent, {
-            loadPaths: [path.dirname(filePath)]
-        });
-
-        const cssContent = result.css.toString ? result.css.toString() : String(result.css);
-
-        if (postcss && selectorParser) {
-            const root = postcss.parse(cssContent, { from: undefined });
-            root.walkRules(rule => {
-                try {
-                    selectorParser(selectors => {
-                        selectors.walkClasses(classNode => {
-                            if (classNode.value) classes.add(classNode.value);
-                        });
-                        // also capture class-like attributes (e.g., [class~="foo"])
-                        selectors.walkAttributes(attrNode => {
-                            if (attrNode.attribute === 'class' && attrNode.value) {
-                                // value may be "foo" or "~='foo bar'"
-                                attrNode.value.split(/\s+/).forEach(v => v && classes.add(v));
-                            }
-                        });
-                    }).processSync(rule.selector);
-                } catch (e) {
-                    // ignore invalid selectors
-                }
-            });
-        } else {
-            // Fallback: conservative regex. This is less accurate than postcss.
-            const classRegex = /\.([a-zA-Z0-9_-]+)(?=[\s\.\[:,{>+~#])/g;
-            let match;
-            while ((match = classRegex.exec(cssContent)) !== null) {
-                if (match[1]) classes.add(match[1]);
-            }
-            // also catch .class { and .class, .class: and .class>
-            const classRegex2 = /\.([a-zA-Z0-9_-]+)\s*[{:,>~]/g;
-            while ((match = classRegex2.exec(cssContent)) !== null) {
-                if (match[1]) classes.add(match[1]);
-            }
-        }
-    } catch (error) {
-        console.warn(`Warning: Error compiling SCSS file ${filePath}: ${error.message}`);
-    }
-
-    return classes;
-}
-
-// Helpers to collect static class names from AST expressions
-function collectFromExpression(expr, classes, filePath) {
-    // classes: Set to add to
-    if (!expr) return;
-
-    switch (expr.type) {
-        case 'StringLiteral':
-            expr.value.split(/\s+/).forEach(c => c && classes.add(c));
-            break;
-        case 'TemplateLiteral':
-            expr.quasis.forEach(q => {
-                q.value.raw.split(/\s+/).forEach(c => c && classes.add(c));
-            });
-            // try to extract string literal expressions inside template (rare)
-            expr.expressions.forEach(e => collectFromExpression(e, classes, filePath));
-            break;
-        case 'BinaryExpression':
-            // "a" + " " + "b"
-            collectFromExpression(expr.left, classes, filePath);
-            collectFromExpression(expr.right, classes, filePath);
-            break;
-        case 'ArrayExpression':
-            expr.elements.forEach(el => collectFromExpression(el, classes, filePath));
-            break;
-        case 'ObjectExpression':
-            // keys may be Identifier or StringLiteral; include all keys as potentially used
-            // This handles BEM modifiers and conditional classes (e.g., classNames({ 'class--modifier': condition }))
-            expr.properties.forEach(prop => {
-                if (prop.type === 'ObjectProperty') {
-                    const keyName = prop.key.type === 'Identifier' ? prop.key.name :
-                        (prop.key.type === 'StringLiteral' ? prop.key.value : null);
-                    // Include all keys regardless of their value, since the condition may be true at runtime
-                    if (keyName) {
-                        classes.add(keyName);
-                    }
-                }
-            });
-            break;
-        case 'ConditionalExpression':
-            collectFromExpression(expr.consequent, classes, filePath);
-            collectFromExpression(expr.alternate, classes, filePath);
-            break;
-        case 'CallExpression':
-            // handle common helpers like clsx/classNames: args can be strings, arrays, objects
-            if (expr.callee) {
-                const calleeName = getCalleeName(expr.callee);
-                if (['clsx', 'classNames', 'cx'].includes(calleeName)) {
-                    expr.arguments.forEach(arg => collectFromExpression(arg, classes, filePath));
-                } else {
-                    // generic call: try to collect string-literal or template literal args
-                    expr.arguments.forEach(arg => collectFromExpression(arg, classes, filePath));
-                }
-            }
-            break;
-        case 'Identifier':
-            // identifier may reference a string constant or imported styles object: can't resolve reliably
-            // but if it looks like "styles" used in MemberExpression elsewhere we'll catch MemberExpression
-            // nothing to add for bare identifier
-            break;
-        case 'MemberExpression':
-            // e.g., styles.foo or styles['foo'] => collect 'foo'
-            if (!expr.computed && expr.property && expr.property.type === 'Identifier') {
-                classes.add(expr.property.name);
-            } else if (expr.computed && expr.property && expr.property.type === 'StringLiteral') {
-                classes.add(expr.property.value);
-            }
-            break;
-        default:
-            // Unhandled nodes: attempt to traverse known subnodes
-            if (expr.left) collectFromExpression(expr.left, classes, filePath);
-            if (expr.right) collectFromExpression(expr.right, classes, filePath);
-            if (expr.callee) collectFromExpression(expr.callee, classes, filePath);
-            if (expr.arguments) expr.arguments.forEach(a => collectFromExpression(a, classes, filePath));
-    }
-}
-
-function getCalleeName(callee) {
-    if (!callee) return null;
-    if (callee.type === 'Identifier') return callee.name;
-    if (callee.type === 'MemberExpression') {
-        if (callee.property.type === 'Identifier') return callee.property.name;
-        if (callee.property.type === 'Literal') return String(callee.property.value);
-    }
-    return null;
-}
-
-// Extract classes used in React files
-function extractReactClasses(reactContent, filePath) {
-    const classes = new Set();
-
-    let ast;
-    try {
-        ast = parser.parse(reactContent, {
-            sourceType: 'module',
-            plugins: ['jsx', 'typescript', 'classProperties', 'optionalChaining', 'nullishCoalescingOperator']
-        });
-    } catch (error) {
-        console.warn(`Warning: Error parsing React file ${filePath}: ${error.message}`);
-        return classes;
-    }
-
-    traverse(ast, {
-        JSXAttribute(path) {
-            try {
-                const name = path.node.name && path.node.name.name;
-                if (name !== 'className' && name !== 'class') return;
-
-                const val = path.node.value;
-                if (!val) return;
-                if (val.type === 'StringLiteral') {
-                    val.value.split(/\s+/).forEach(c => c && classes.add(c));
-                } else if (val.type === 'JSXExpressionContainer') {
-                    collectFromExpression(val.expression, classes, filePath);
-                } else if (val.type === 'JSXElement') {
-                    // unlikely - ignore
-                }
-            } catch (e) {
-                // ignore
-            }
-        },
-        CallExpression(path) {
-            try {
-                const calleeName = getCalleeName(path.node.callee);
-                if (['clsx', 'classNames', 'cx'].includes(calleeName)) {
-                    path.node.arguments.forEach(arg => collectFromExpression(arg, classes, filePath));
-                }
-            } catch (e) { /* ignore */ }
-        }
-    });
-
-    return classes;
-}
-
-// Main analyzer
-function analyzeScssUsage(directory) {
     const resolvedDir = path.resolve(directory);
-    if (!fs.existsSync(resolvedDir)) throw new Error(`Directory does not exist: ${resolvedDir}`);
-    if (!fs.statSync(resolvedDir).isDirectory()) throw new Error(`Path is not a directory: ${resolvedDir}`);
-
-    // Discover files
-    const reactExts = ['.js', '.jsx', '.ts', '.tsx'];
-    const scssExts = ['.scss'];
-
-    const reactFiles = getFiles(resolvedDir, reactExts);
-    const scssFiles = getFiles(resolvedDir, scssExts);
-
-    if (reactFiles.length === 0) {
-        console.warn('Warning: No React files (.js/.jsx/.ts/.tsx) found.');
+    if (!fs.existsSync(resolvedDir)) {
+        throw new Error(`Directory does not exist: ${resolvedDir}`);
     }
-    if (scssFiles.length === 0) {
-        console.warn('Warning: No SCSS files (.scss) found.');
+    if (!fs.statSync(resolvedDir).isDirectory()) {
+        throw new Error(`Path is not a directory: ${resolvedDir}`);
     }
 
-    // Map: className -> Set of scss files where defined
+    const cache = new FileCache(resolvedDir, !noCache);
+
+    // ── 1. Discover files ──────────────────────────────────────────────────────
+    const reactFiles = getFiles(resolvedDir, REACT_EXTS);
+    const scssFiles  = getFiles(resolvedDir, SCSS_EXTS);
+
+    if (reactFiles.length === 0) console.warn('Warning: No React files (.js/.jsx/.ts/.tsx) found.');
+    if (scssFiles.length  === 0) console.warn('Warning: No SCSS/CSS files found.');
+
+    // ── 2. Extract SCSS classes ────────────────────────────────────────────────
+    // Map<className → Set<relPath>>
     const allScssClasses = new Map();
-    scssFiles.forEach(file => {
-        const content = safeRead(file);
-        const classes = extractScssClasses(content, file);
-        classes.forEach(cls => {
+
+    for (const file of scssFiles) {
+        const relPath = path.relative(resolvedDir, file);
+
+        let classes = cache.get(file);
+        if (!classes) {
+            classes = Array.from(extractClassesFromScssFile(file, resolvedDir));
+            cache.set(file, classes);
+        }
+
+        for (const cls of classes) {
             if (!allScssClasses.has(cls)) allScssClasses.set(cls, new Set());
-            allScssClasses.get(cls).add(file);
-        });
-    });
+            allScssClasses.get(cls).add(relPath);
+        }
+    }
 
-    // Map: className -> Set of react files where used
-    const usedClasses = new Map();
-    reactFiles.forEach(file => {
-        const content = safeRead(file);
-        const classes = extractReactClasses(content, file);
-        classes.forEach(cls => {
+    // ── 3. Extract React class usage ──────────────────────────────────────────
+    // Map<className → Set<relPath>>  (static)
+    // Map<pattern   → Set<relPath>>  (dynamic)
+    const usedClasses      = new Map();
+    const dynamicPatterns  = new Map();
+
+    for (const file of reactFiles) {
+        const relPath = path.relative(resolvedDir, file);
+
+        let cached = cache.get(file);
+        if (!cached) {
+            const { staticClasses, dynamicPatterns: dp } = extractClassesFromReactFile(file);
+            cached = {
+                staticClasses: Array.from(staticClasses),
+                dynamicPatterns: Array.from(dp),
+            };
+            cache.set(file, cached);
+        }
+
+        for (const cls of cached.staticClasses) {
             if (!usedClasses.has(cls)) usedClasses.set(cls, new Set());
-            usedClasses.get(cls).add(file);
-        });
-    });
+            usedClasses.get(cls).add(relPath);
+        }
+        for (const pat of cached.dynamicPatterns) {
+            if (!dynamicPatterns.has(pat)) dynamicPatterns.set(pat, new Set());
+            dynamicPatterns.get(pat).add(relPath);
+        }
+    }
 
-    // Unused classes: those defined in SCSS but not used in React
-    const unusedClasses = new Map();
-    allScssClasses.forEach((filesSet, cls) => {
-        if (!usedClasses.has(cls)) unusedClasses.set(cls, filesSet);
-    });
+    cache.save();
+
+    // ── 4. Classify results ───────────────────────────────────────────────────
+
+    // Build a set of class prefixes from dynamic patterns so we can suppress
+    // false positives: e.g. `btn-${size}` → prefix "btn-"
+    const dynamicPrefixes = _buildDynamicPrefixes(dynamicPatterns);
+
+    // Unused: defined in SCSS, not used statically, not covered by a dynamic prefix
+    const unusedClasses = [];
+    for (const [cls, files] of allScssClasses) {
+        const usageCount = usedClasses.has(cls) ? usedClasses.get(cls).size : 0;
+        const isDynamic  = _coveredByDynamic(cls, dynamicPrefixes);
+        const belowThreshold = threshold > 0 && usageCount > 0 && usageCount < threshold;
+
+        if (isDynamic) continue; // suppress — likely generated at runtime
+
+        if (usageCount === 0 || belowThreshold) {
+            unusedClasses.push({
+                className:  cls,
+                definedIn:  Array.from(files),
+                usageCount,
+                dynamic:    isDynamic,
+            });
+        }
+    }
+
+    // Ghost: used in React but never defined in SCSS
+    const ghostClasses = [];
+    for (const [cls, files] of usedClasses) {
+        if (!allScssClasses.has(cls)) {
+            ghostClasses.push({
+                className: cls,
+                usedIn:    Array.from(files),
+            });
+        }
+    }
+
+    // Sort outputs alphabetically
+    unusedClasses.sort((a, b) => a.className.localeCompare(b.className));
+    ghostClasses.sort((a, b) => a.className.localeCompare(b.className));
+
+    const dynamicPatternsArr = Array.from(dynamicPatterns.entries()).map(([pattern, files]) => ({
+        pattern,
+        files: Array.from(files),
+    }));
 
     return {
-        directory: resolvedDir,
-        scssFilesCount: scssFiles.length,
-        reactFilesCount: reactFiles.length,
-        totalScssClasses: allScssClasses.size,
-        totalUsedClasses: usedClasses.size,
-        unusedClassesCount: unusedClasses.size,
-        unusedClasses: Array.from(unusedClasses.entries()).map(([cls, filesSet]) => ({
-            className: cls,
-            definedIn: Array.from(filesSet).map(f => path.relative(resolvedDir, f))
-        })),
-        // additional helpful data
+        directory:         resolvedDir,
+        scssFilesCount:    scssFiles.length,
+        reactFilesCount:   reactFiles.length,
+        totalScssClasses:  allScssClasses.size,
+        totalUsedClasses:  usedClasses.size,
+        unusedClassesCount: unusedClasses.length,
+        ghostClassesCount:  ghostClasses.length,
+        dynamicPatternCount: dynamicPatternsArr.length,
+        unusedClasses,
+        ghostClasses,
+        dynamicPatterns:   dynamicPatternsArr,
+        // Full data for --json consumers
         allScssClasses: Array.from(allScssClasses.entries()).map(([cls, files]) => ({
-            className: cls,
-            definedIn: Array.from(files).map(f => path.relative(resolvedDir, f))
+            className: cls, definedIn: Array.from(files),
         })),
         usedClasses: Array.from(usedClasses.entries()).map(([cls, files]) => ({
-            className: cls,
-            usedIn: Array.from(files).map(f => path.relative(resolvedDir, f))
-        }))
+            className: cls, usedIn: Array.from(files),
+        })),
     };
 }
 
-// CLI
-function printTextReport(report) {
-    console.log('\nSCSS Usage Analysis Report');
-    console.log('--------------------------');
-    console.log(`Analyzed directory: ${report.directory}`);
-    console.log(`React files: ${report.reactFilesCount}`);
-    console.log(`SCSS files: ${report.scssFilesCount}`);
-    console.log(`Total SCSS classes found: ${report.totalScssClasses}`);
-    console.log(`Total classes used in React: ${report.totalUsedClasses}`);
-    console.log(`Number of unused classes: ${report.unusedClassesCount}`);
+// ─── Dynamic Pattern Helpers ─────────────────────────────────────────────────
 
-    if (report.unusedClasses.length > 0) {
-        console.log('\nUnused classes and their locations:');
-        report.unusedClasses.forEach(u => {
-            console.log(`- ${u.className} (defined in: ${u.definedIn.join(', ')})`);
-        });
-    } else {
-        console.log('\nNo unused classes found (based on static analysis).');
+/**
+ * From dynamic patterns like "btn-${…}-active" extract the static prefix/suffix
+ * segments so we can suppress classes like "btn-lg-active".
+ */
+function _buildDynamicPrefixes(dynamicPatterns) {
+    const prefixes = [];
+    for (const pattern of dynamicPatterns.keys()) {
+        // Split on ${…} markers and record non-empty parts
+        const parts = pattern.split('${…}').filter(Boolean);
+        if (parts.length) prefixes.push(parts);
     }
+    return prefixes;
 }
 
-function printJson(report) {
-    console.log(JSON.stringify(report, null, 2));
+function _coveredByDynamic(className, prefixes) {
+    for (const parts of prefixes) {
+        let pos = 0;
+        let matched = true;
+        for (const part of parts) {
+            const idx = className.indexOf(part, pos);
+            if (idx === -1) { matched = false; break; }
+            pos = idx + part.length;
+        }
+        if (matched) return true;
+    }
+    return false;
 }
 
-// Entry
+// ─── Watch Mode ──────────────────────────────────────────────────────────────
+
+function watchMode(directory, opts) {
+    console.log(`\nWatch mode active. Monitoring: ${path.resolve(directory)}\n`);
+    let debounce = null;
+
+    function run() {
+        console.clear();
+        try {
+            const report = analyzeScssUsage(directory, { ...opts, noCache: true });
+            if (opts.json) printJsonReport(report);
+            else printTextReport(report, opts);
+        } catch (err) {
+            console.error('Error:', err.message);
+        }
+        console.log('\nWaiting for changes…');
+    }
+
+    run();
+
+    fs.watch(path.resolve(directory), { recursive: true }, (event, filename) => {
+        if (!filename) return;
+        const ext = path.extname(filename);
+        if (![...REACT_EXTS, ...SCSS_EXTS].includes(ext)) return;
+        clearTimeout(debounce);
+        debounce = setTimeout(run, 300);
+    });
+}
+
+// ─── CLI ─────────────────────────────────────────────────────────────────────
+
 if (require.main === module) {
     const argv = process.argv.slice(2);
     let directory = '.';
-    let asJson = false;
+    let asJson    = false;
+    let noCache   = false;
+    let watch     = false;
+    let threshold = 0;
+
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
-        if (a === '--json') asJson = true;
-        else if (a === '--dir' && argv[i + 1]) { directory = argv[i + 1]; i++; }
-        else if (!a.startsWith('--')) directory = a;
+        if (a === '--json')    { asJson  = true; }
+        else if (a === '--no-cache') { noCache = true; }
+        else if (a === '--watch')    { watch   = true; }
+        else if ((a === '--dir' || a === '-d') && argv[i + 1]) { directory = argv[++i]; }
+        else if (a === '--threshold' && argv[i + 1]) { threshold = parseInt(argv[++i], 10) || 0; }
+        else if (!a.startsWith('--')) { directory = a; }
     }
 
-    try {
-        const report = analyzeScssUsage(directory);
-        if (asJson) printJson(report);
-        else printTextReport(report);
-        process.exit(0);
-    } catch (err) {
-        console.error('Error:', err.message);
-        process.exit(1);
+    const opts = { noCache, threshold, json: asJson };
+
+    if (watch) {
+        watchMode(directory, opts);
+    } else {
+        try {
+            const report = analyzeScssUsage(directory, opts);
+            if (asJson) printJsonReport(report);
+            else printTextReport(report, opts);
+            process.exit(0);
+        } catch (err) {
+            console.error('Error:', err.message);
+            process.exit(1);
+        }
     }
 }
+
+module.exports = { analyzeScssUsage };
